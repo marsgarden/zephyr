@@ -11,9 +11,9 @@ used as project list.
 Include file is generated for Kconfig using --kconfig-out.
 A <name>:<path> text file is generated for use with CMake using --cmake-out.
 
-Using --sanitycheck-out <filename> an argument file for sanitycheck script will
+Using --twister-out <filename> an argument file for twister script will
 be generated which would point to test and sample roots available in modules
-that can be included during a sanitycheck run. This allows testing code
+that can be included during a twister run. This allows testing code
 maintained in modules in addition to what is available in the main Zephyr tree.
 '''
 
@@ -129,16 +129,20 @@ def process_cmake(module, meta):
     cmake_setting = section.get('cmake', None)
     if not validate_setting(cmake_setting, module, 'CMakeLists.txt'):
         sys.exit('ERROR: "cmake" key in {} has folder value "{}" which '
-                    'does not contain a CMakeLists.txt file.'
-                    .format(module_yml.as_posix(), cmake_setting))
+                 'does not contain a CMakeLists.txt file.'
+                 .format(module_yml.as_posix(), cmake_setting))
 
     cmake_path = os.path.join(module, cmake_setting or 'zephyr')
     cmake_file = os.path.join(cmake_path, 'CMakeLists.txt')
     if os.path.isfile(cmake_file):
-        return('\"{}\":\"{}\"\n'
-                        .format(module_path.name, Path(cmake_path).resolve().as_posix()))
+        return('\"{}\":\"{}\":\"{}\"\n'
+               .format(module_path.name,
+                       module_path.as_posix(),
+                       Path(cmake_path).resolve().as_posix()))
     else:
-        return ""
+        return('\"{}\":\"{}\":\"\"\n'
+               .format(module_path.name,
+                       module_path.as_posix()))
 
 def process_settings(module, meta):
     section = meta.get('build', dict())
@@ -150,9 +154,10 @@ def process_settings(module, meta):
             setting = build_settings.get(root+'_root', None)
             if setting is not None:
                 root_path = PurePath(module) / setting
-                out_text += f'"{root.upper()}_ROOT":"{root_path}"\n'
+                out_text += f'"{root.upper()}_ROOT":"{root_path.as_posix()}"\n'
 
     return out_text
+
 
 def process_kconfig(module, meta):
     section = meta.get('build', dict())
@@ -162,17 +167,17 @@ def process_kconfig(module, meta):
     kconfig_setting = section.get('kconfig', None)
     if not validate_setting(kconfig_setting, module):
         sys.exit('ERROR: "kconfig" key in {} has value "{}" which does '
-                    'not point to a valid Kconfig file.'
-                    .format(module_yml, kconfig_setting))
-
+                 'not point to a valid Kconfig file.'
+                 .format(module_yml, kconfig_setting))
 
     kconfig_file = os.path.join(module, kconfig_setting or 'zephyr/Kconfig')
     if os.path.isfile(kconfig_file):
-        return 'osource "{}"\n\n'.format(Path(kconfig_file).resolve().as_posix())
+        return 'osource "{}"\n\n'.format(Path(kconfig_file)
+                                         .resolve().as_posix())
     else:
         return ""
 
-def process_sanitycheck(module, meta):
+def process_twister(module, meta):
 
     out = ""
     tests = meta.get('tests', [])
@@ -182,12 +187,14 @@ def process_sanitycheck(module, meta):
     for pth in tests + samples:
         if pth:
             dir = os.path.join(module, pth)
-            out += '-T\n{}\n'.format(PurePath(os.path.abspath(dir)).as_posix())
+            out += '-T\n{}\n'.format(PurePath(os.path.abspath(dir))
+                                     .as_posix())
 
     for pth in boards:
         if pth:
             dir = os.path.join(module, pth)
-            out += '--board-root\n{}\n'.format(PurePath(os.path.abspath(dir)).as_posix())
+            out += '--board-root\n{}\n'.format(PurePath(os.path.abspath(dir))
+                                               .as_posix())
 
     return out
 
@@ -200,8 +207,9 @@ def main():
     parser.add_argument('--kconfig-out',
                         help="""File to write with resulting KConfig import
                              statements.""")
-    parser.add_argument('--sanitycheck-out',
-                        help="""File to write with resulting sanitycheck parameters.""")
+    parser.add_argument('--twister-out',
+                        help="""File to write with resulting twister
+                             parameters.""")
     parser.add_argument('--cmake-out',
                         help="""File to write with resulting <name>:<path>
                              values to use for including in CMake""")
@@ -218,7 +226,8 @@ def main():
     args = parser.parse_args()
 
     if args.modules is None:
-        # West is imported here, as it is optional (and thus maybe not installed)
+        # West is imported here, as it is optional
+        # (and thus maybe not installed)
         # if user is providing a specific modules list.
         from west.manifest import Manifest
         from west.util import WestNotFound
@@ -239,7 +248,7 @@ def main():
     kconfig = ""
     cmake = ""
     settings = ""
-    sanitycheck = ""
+    twister = ""
 
     Module = namedtuple('Module', ['project', 'meta', 'depends'])
     # dep_modules is a list of all modules that has an unresolved dependency
@@ -294,7 +303,7 @@ def main():
         kconfig += process_kconfig(module.project, module.meta)
         cmake += process_cmake(module.project, module.meta)
         settings += process_settings(module.project, module.meta)
-        sanitycheck += process_sanitycheck(module.project, module.meta)
+        twister += process_twister(module.project, module.meta)
 
     if args.kconfig_out:
         with open(args.kconfig_out, 'w', encoding="utf-8") as fp:
@@ -308,9 +317,10 @@ def main():
         with open(args.settings_out, 'w', encoding="utf-8") as fp:
             fp.write(settings)
 
-    if args.sanitycheck_out:
-        with open(args.sanitycheck_out, 'w', encoding="utf-8") as fp:
-            fp.write(sanitycheck)
+    if args.twister_out:
+        with open(args.twister_out, 'w', encoding="utf-8") as fp:
+            fp.write(twister)
+
 
 if __name__ == "__main__":
     main()
