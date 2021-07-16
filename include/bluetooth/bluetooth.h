@@ -54,6 +54,12 @@ struct bt_le_per_adv_sync;
 /* Don't require everyone to include conn.h */
 struct bt_conn;
 
+/* Don't require everyone to include iso.h */
+struct bt_iso_biginfo;
+
+/* Don't require everyone to include direction.h */
+struct bt_df_per_adv_sync_iq_samples_report;
+
 struct bt_le_ext_adv_sent_info {
 	/** The number of advertising events completed. */
 	uint8_t num_sent;
@@ -124,6 +130,11 @@ typedef void (*bt_ready_cb_t)(int err);
  * Enable Bluetooth. Must be the called before any calls that
  * require communication with the local Bluetooth hardware.
  *
+ * When @kconfig{CONFIG_BT_SETTINGS} has been enabled and the application is not
+ * managing identities of the stack itself then the application must call
+ * @ref settings_load() before the stack is fully enabled.
+ * See @ref bt_id_create() for more information.
+ *
  * @param cb Callback to notify completion or NULL to perform the
  * enabling synchronously.
  *
@@ -135,6 +146,10 @@ int bt_enable(bt_ready_cb_t cb);
  * @brief Set Bluetooth Device Name
  *
  * Set Bluetooth GAP Device Name.
+ *
+ * When advertising with device name in the advertising data the name should
+ * be updated by calling @ref bt_le_adv_update_data or
+ * @ref bt_le_ext_adv_set_data.
  *
  * @param name New name
  *
@@ -152,22 +167,6 @@ int bt_set_name(const char *name);
 const char *bt_get_name(void);
 
 /**
- * @brief Set the local Identity Address
- *
- * Allows setting the local Identity Address from the application.
- * This API must be called before calling bt_enable(). Calling it at any
- * other time will cause it to fail. In most cases the application doesn't
- * need to use this API, however there are a few valid cases where
- * it can be useful (such as for testing).
- *
- * At the moment, the given address must be a static random address. In the
- * future support for public addresses may be added.
- *
- * @return Zero on success or (negative) error code otherwise.
- */
-int bt_set_id_addr(const bt_addr_le_t *addr);
-
-/**
  * @brief Get the currently configured identities.
  *
  * Returns an array of the currently configured identity addresses. To
@@ -175,6 +174,10 @@ int bt_set_id_addr(const bt_addr_le_t *addr);
  * elements in the @a addrs array should be CONFIG_BT_ID_MAX. The identity
  * identifier that some APIs expect (such as advertising parameters) is
  * simply the index of the identity in the @a addrs array.
+ *
+ * If @a addrs is passed as NULL, then returned @a count contains the
+ * count of all available identities that can be retrieved with a
+ * subsequent call to this function with non-NULL @a addrs parameter.
  *
  * @note Deleted identities may show up as BT_LE_ADDR_ANY in the returned
  * array.
@@ -200,6 +203,9 @@ void bt_id_get(bt_addr_le_t *addrs, size_t *count);
  * the address from and will be able to repeat the procedure on every power
  * cycle, i.e. it would be redundant to also store the information in flash.
  *
+ * Generating random static address or random IRK is not supported when calling
+ * this function before bt_enable().
+ *
  * If the application wants to have the stack randomly generate identities
  * and store them in flash for later recovery, the way to do it would be
  * to first initialize the stack (using bt_enable), then call settings_load(),
@@ -208,8 +214,8 @@ void bt_id_get(bt_addr_le_t *addrs, size_t *count);
  * call bt_id_create() to create new ones.
  *
  * @param addr Address to use for the new identity. If NULL or initialized
- *             to BT_ADDR_LE_ANY the stack will generate a new static
- *             random address for the identity and copy it to the given
+ *             to BT_ADDR_LE_ANY the stack will generate a new random
+ *             static address for the identity and copy it to the given
  *             parameter upon return from this function (in case the
  *             parameter was non-NULL).
  * @param irk  Identity Resolving Key (16 bytes) to be used with this
@@ -217,7 +223,7 @@ void bt_id_get(bt_addr_le_t *addrs, size_t *count);
  *             generate a random IRK for the identity and copy it back
  *             to the parameter upon return from this function (in case
  *             the parameter was non-NULL). If privacy
- *             @option{CONFIG_BT_PRIVACY} is not enabled this parameter must
+ *             @kconfig{CONFIG_BT_PRIVACY} is not enabled this parameter must
  *             be NULL.
  *
  * @return Identity identifier (>= 0) in case of success, or a negative
@@ -251,7 +257,7 @@ int bt_id_create(bt_addr_le_t *addr, uint8_t *irk);
  *             generate a random IRK for the identity and copy it back
  *             to the parameter upon return from this function (in case
  *             the parameter was non-NULL). If privacy
- *             @option{CONFIG_BT_PRIVACY} is not enabled this parameter must
+ *             @kconfig{CONFIG_BT_PRIVACY} is not enabled this parameter must
  *             be NULL.
  *
  * @return Identity identifier (>= 0) in case of success, or a negative
@@ -331,7 +337,7 @@ enum {
 	 * Advertise as connectable. If not connectable then the type of
 	 * advertising is determined by providing scan response data.
 	 * The advertiser address is determined by the type of advertising
-	 * and/or enabling privacy @option{CONFIG_BT_PRIVACY}.
+	 * and/or enabling privacy @kconfig{CONFIG_BT_PRIVACY}.
 	 */
 	BT_LE_ADV_OPT_CONNECTABLE = BIT(0),
 
@@ -363,7 +369,26 @@ enum {
 	 */
 	BT_LE_ADV_OPT_USE_IDENTITY = BIT(2),
 
-	/** Advertise using GAP device name */
+	/** Advertise using GAP device name.
+	 *
+	 *  Include the GAP device name automatically when advertising.
+	 *  By default the GAP device name is put at the end of the scan
+	 *  response data.
+	 *  When advertising using @ref BT_LE_ADV_OPT_EXT_ADV and not
+	 *  @ref BT_LE_ADV_OPT_SCANNABLE then it will be put at the end of the
+	 *  advertising data.
+	 *  If the GAP device name does not fit into advertising data it will be
+	 *  converted to a shortened name if possible.
+	 *  @ref BT_LE_ADV_OPT_FORCE_NAME_IN_AD can be used to force the device
+	 *  name to appear in the advertising data of an advert with scan
+	 *  response data.
+	 *
+	 *  The application can set the device name itself by including the
+	 *  following in the advertising data.
+	 *  @code
+	 *  BT_DATA(BT_DATA_NAME_COMPLETE, name, strlen(name))
+	 *  @endcode
+	 */
 	BT_LE_ADV_OPT_USE_NAME = BIT(3),
 
 	/**
@@ -481,6 +506,16 @@ enum {
 
 	/** Disable advertising on channel index 39. */
 	BT_LE_ADV_OPT_DISABLE_CHAN_39 = BIT(17),
+
+	/**
+	 * @brief Put GAP device name into advert data
+	 *
+	 * Will place the GAP device name into the advertising data rather
+	 * than the scan response data.
+	 *
+	 * @note Requires @ref BT_LE_ADV_OPT_USE_NAME
+	 */
+	BT_LE_ADV_OPT_FORCE_NAME_IN_AD = BIT(18),
 };
 
 /** LE Advertising Parameters. */
@@ -488,13 +523,10 @@ struct bt_le_adv_param {
 	/**
 	 * @brief Local identity.
 	 *
-	 * @note When extended advertising @option{CONFIG_BT_EXT_ADV} is not
+	 * @note When extended advertising @kconfig{CONFIG_BT_EXT_ADV} is not
 	 *       enabled or not supported by the controller it is not possible
 	 *       to scan and advertise simultaneously using two different
 	 *       random addresses.
-	 *
-	 * @note It is not possible to have multiple connectable advertising
-	 *       sets advertising simultaneously using different identities.
 	 */
 	uint8_t  id;
 
@@ -518,10 +550,22 @@ struct bt_le_adv_param {
 	/** Bit-field of advertising options */
 	uint32_t options;
 
-	/** Minimum Advertising Interval (N * 0.625) */
+	/** Minimum Advertising Interval (N * 0.625 milliseconds)
+	 * Minimum Advertising Interval shall be less than or equal to the
+	 * Maximum Advertising Interval. The Minimum Advertising Interval and
+	 * Maximum Advertising Interval should not be the same value (as stated
+	 * in Bluetooth Core Spec 5.2, section 7.8.5)
+	 * Range: 0x0020 to 0x4000
+	 */
 	uint32_t interval_min;
 
-	/** Maximum Advertising Interval (N * 0.625) */
+	/** Maximum Advertising Interval (N * 0.625 milliseconds)
+	 * Minimum Advertising Interval shall be less than or equal to the
+	 * Maximum Advertising Interval. The Minimum Advertising Interval and
+	 * Maximum Advertising Interval should not be the same value (as stated
+	 * in Bluetooth Core Spec 5.2, section 7.8.5)
+	 * Range: 0x0020 to 0x4000
+	 */
 	uint32_t interval_max;
 
 	/**
@@ -557,10 +601,20 @@ enum {
 };
 
 struct bt_le_per_adv_param {
-	/** Minimum Periodic Advertising Interval (N * 1.25 ms) */
+	/**
+	 * @brief Minimum Periodic Advertising Interval (N * 1.25 ms)
+	 *
+	 * Shall be greater or equal to BT_GAP_PER_ADV_MIN_INTERVAL and
+	 * less or equal to interval_max.
+	 */
 	uint16_t interval_min;
 
-	/** Maximum Periodic Advertising Interval (N * 1.25 ms) */
+	/**
+	 * @brief Maximum Periodic Advertising Interval (N * 1.25 ms)
+	 *
+	 * Shall be less or equal to BT_GAP_PER_ADV_MAX_INTERVAL and
+	 * greater or equal to interval_min.
+	 */
 	uint16_t interval_max;
 
 	/** Bit-field of periodic advertising options */
@@ -615,6 +669,12 @@ struct bt_le_per_adv_param {
 					    BT_GAP_ADV_FAST_INT_MIN_2, \
 					    BT_GAP_ADV_FAST_INT_MAX_2, NULL)
 
+#define BT_LE_ADV_CONN_NAME_AD BT_LE_ADV_PARAM(BT_LE_ADV_OPT_CONNECTABLE | \
+					    BT_LE_ADV_OPT_USE_NAME | \
+					    BT_LE_ADV_OPT_FORCE_NAME_IN_AD, \
+					    BT_GAP_ADV_FAST_INT_MIN_2, \
+					    BT_GAP_ADV_FAST_INT_MAX_2, NULL)
+
 #define BT_LE_ADV_CONN_DIR_LOW_DUTY(_peer) \
 	BT_LE_ADV_PARAM(BT_LE_ADV_OPT_CONNECTABLE | BT_LE_ADV_OPT_ONE_TIME | \
 			BT_LE_ADV_OPT_DIR_MODE_LOW_DUTY, \
@@ -635,6 +695,14 @@ struct bt_le_per_adv_param {
 						 BT_GAP_ADV_FAST_INT_MIN_2, \
 						 BT_GAP_ADV_FAST_INT_MAX_2, \
 						 NULL)
+
+/** Connectable extended advertising with @ref BT_LE_ADV_OPT_USE_NAME */
+#define BT_LE_EXT_ADV_CONN_NAME BT_LE_ADV_PARAM(BT_LE_ADV_OPT_EXT_ADV | \
+						BT_LE_ADV_OPT_CONNECTABLE | \
+						BT_LE_ADV_OPT_USE_NAME, \
+						BT_GAP_ADV_FAST_INT_MIN_2, \
+						BT_GAP_ADV_FAST_INT_MAX_2, \
+						NULL)
 
 /** Non-connectable extended advertising with private address */
 #define BT_LE_EXT_ADV_NCONN BT_LE_ADV_PARAM(BT_LE_ADV_OPT_EXT_ADV, \
@@ -819,8 +887,8 @@ struct bt_le_ext_adv_start_param {
 	 * this parameters must be set to a non-zero value less than or equal
 	 * to the maximum of @ref BT_GAP_ADV_HIGH_DUTY_CYCLE_MAX_TIMEOUT.
 	 *
-	 * If privacy @option{CONFIG_BT_PRIVACY} is enabled then the timeout
-	 * must be less than @option{CONFIG_BT_RPA_TIMEOUT}.
+	 * If privacy @kconfig{CONFIG_BT_PRIVACY} is enabled then the timeout
+	 * must be less than @kconfig{CONFIG_BT_RPA_TIMEOUT}.
 	 */
 	uint16_t timeout;
 	/**
@@ -1087,7 +1155,7 @@ struct bt_le_per_adv_sync_recv_info {
 	/** The RSSI of the advertisement excluding any CTE. */
 	int8_t rssi;
 
-	/** The Constant Tone Extension (CTE) of the advertisement */
+	/** The Constant Tone Extension (CTE) of the advertisement (@ref bt_df_cte_type) */
 	uint8_t cte_type;
 };
 
@@ -1150,6 +1218,27 @@ struct bt_le_per_adv_sync_cb {
 	void (*state_changed)(struct bt_le_per_adv_sync *sync,
 			      const struct bt_le_per_adv_sync_state_info *info);
 
+	/**
+	 * @brief BIGInfo advertising report received.
+	 *
+	 * This callback notifies the application of a BIGInfo advertising report.
+	 * This is received if the advertiser is broadcasting isochronous streams in a BIG.
+	 * See iso.h for more information.
+	 *
+	 * @param sync     The advertising set object.
+	 * @param biginfo  The BIGInfo report.
+	 */
+	void (*biginfo)(struct bt_le_per_adv_sync *sync, const struct bt_iso_biginfo *biginfo);
+
+	/**
+	 * @brief Callback for IQ samples report collected when sampling
+	 *        CTE received with periodic advertising PDU.
+	 *
+	 * @param sync The periodic advertising sync object.
+	 * @param info Information about the sync event.
+	 */
+	void (*cte_report_cb)(struct bt_le_per_adv_sync *sync,
+			      struct bt_df_per_adv_sync_iq_samples_report const *info);
 
 	sys_snode_t node;
 };
@@ -1234,6 +1323,43 @@ struct bt_le_per_adv_sync_param {
  * The range of the returned value is 0..CONFIG_BT_PER_ADV_SYNC_MAX-1
  */
 uint8_t bt_le_per_adv_sync_get_index(struct bt_le_per_adv_sync *per_adv_sync);
+
+/** @brief Advertising set info structure. */
+struct bt_le_per_adv_sync_info {
+	/** Periodic Advertiser Address */
+	bt_addr_le_t addr;
+
+	/** Advertiser SID */
+	uint8_t sid;
+
+	/** Periodic advertising interval (N * 1.25 ms) */
+	uint16_t interval;
+
+	/** Advertiser PHY */
+	uint8_t phy;
+};
+
+/**
+ * @brief Get periodic adv sync information.
+ *
+ * @param per_adv_sync Periodic advertising sync object.
+ * @param info          Periodic advertising sync info object
+ *
+ * @return Zero on success or (negative) error code on failure.
+ */
+int bt_le_per_adv_sync_get_info(struct bt_le_per_adv_sync *per_adv_sync,
+				struct bt_le_per_adv_sync_info *info);
+
+/**
+ * @brief Look up an existing periodic advertising sync object by advertiser address.
+ *
+ * @param adv_addr Advertiser address.
+ * @param sid      The advertising set ID.
+ *
+ * @return Periodic advertising sync object or NULL if not found.
+ */
+struct bt_le_per_adv_sync *bt_le_per_adv_sync_lookup_addr(const bt_addr_le_t *adv_addr,
+							  uint8_t sid);
 
 /**
  * @brief Create a periodic advertising sync object.
@@ -1477,11 +1603,6 @@ enum {
 	 * @note Requires @ref BT_LE_SCAN_OPT_CODED.
 	 */
 	BT_LE_SCAN_OPT_NO_1M = BIT(3),
-
-	BT_LE_SCAN_FILTER_DUPLICATE __deprecated =
-		BT_LE_SCAN_OPT_FILTER_DUPLICATE,
-	BT_LE_SCAN_FILTER_WHITELIST __deprecated =
-		BT_LE_SCAN_OPT_FILTER_WHITELIST,
 };
 
 enum {
@@ -1497,13 +1618,8 @@ struct bt_le_scan_param {
 	/** Scan type (BT_LE_SCAN_TYPE_ACTIVE or BT_LE_SCAN_TYPE_PASSIVE) */
 	uint8_t  type;
 
-	union {
-		/** Bit-field of scanning filter options. */
-		uint32_t filter_dup __deprecated;
-
-		/** Bit-field of scanning options. */
-		uint32_t options;
-	};
+	/** Bit-field of scanning options. */
+	uint32_t options;
 
 	/** Scan interval (N * 0.625 ms) */
 	uint16_t interval;
@@ -1676,11 +1792,11 @@ struct bt_le_scan_cb {
  * the specified callback.
  *
  * @note The LE scanner by default does not use the Identity Address of the
- *       local device when @option{CONFIG_BT_PRIVACY} is disabled. This is to
+ *       local device when @kconfig{CONFIG_BT_PRIVACY} is disabled. This is to
  *       prevent the active scanner from disclosing the identity information
  *       when requesting additional information from advertisers.
  *       In order to enable directed advertiser reports then
- *       @option{CONFIG_BT_SCAN_WITH_IDENTITY} must be enabled.
+ *       @kconfig{CONFIG_BT_SCAN_WITH_IDENTITY} must be enabled.
  *
  * @param param Scan parameters.
  * @param cb Callback to notify scan results. May be NULL if callback
@@ -1713,6 +1829,15 @@ int bt_le_scan_stop(void);
  * @param cb Callback struct. Must point to memory that remains valid.
  */
 void bt_le_scan_cb_register(struct bt_le_scan_cb *cb);
+
+/**
+ * @brief Unregister scanner packet callbacks.
+ *
+ * Remove the callback structure from the list of scanner callbacks.
+ *
+ * @param cb Callback struct. Must point to memory that remains valid.
+ */
+void bt_le_scan_cb_unregister(struct bt_le_scan_cb *cb);
 
 /**
  * @brief Add device (LE) to whitelist.
@@ -1814,16 +1939,16 @@ struct bt_le_oob {
  * This function allows to get local information that are useful for
  * Out of Band pairing or connection creation.
  *
- * If privacy @option{CONFIG_BT_PRIVACY} is enabled this will result in
+ * If privacy @kconfig{CONFIG_BT_PRIVACY} is enabled this will result in
  * generating new Resolvable Private Address (RPA) that is valid for
- * @option{CONFIG_BT_RPA_TIMEOUT} seconds. This address will be used for
+ * @kconfig{CONFIG_BT_RPA_TIMEOUT} seconds. This address will be used for
  * advertising started by @ref bt_le_adv_start, active scanning and
  * connection creation.
  *
  * @note If privacy is enabled the RPA cannot be refreshed in the following
  *       cases:
  *       - Creating a connection in progress, wait for the connected callback.
- *      In addition when extended advertising @option{CONFIG_BT_EXT_ADV} is
+ *      In addition when extended advertising @kconfig{CONFIG_BT_EXT_ADV} is
  *      not enabled or not supported by the controller:
  *       - Advertiser is enabled using a Random Static Identity Address for a
  *         different local identity.
@@ -1844,9 +1969,9 @@ int bt_le_oob_get_local(uint8_t id, struct bt_le_oob *oob);
  * This function allows to get local information that are useful for
  * Out of Band pairing or connection creation.
  *
- * If privacy @option{CONFIG_BT_PRIVACY} is enabled this will result in
+ * If privacy @kconfig{CONFIG_BT_PRIVACY} is enabled this will result in
  * generating new Resolvable Private Address (RPA) that is valid for
- * @option{CONFIG_BT_RPA_TIMEOUT} seconds. This address will be used by the
+ * @kconfig{CONFIG_BT_RPA_TIMEOUT} seconds. This address will be used by the
  * advertising set.
  *
  * @note When generating OOB information for multiple advertising set all

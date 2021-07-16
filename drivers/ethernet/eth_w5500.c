@@ -157,11 +157,11 @@ static int w5500_writebuf(const struct device *dev, uint16_t offset, uint8_t *bu
 static int w5500_command(const struct device *dev, uint8_t cmd)
 {
 	uint8_t reg;
-	uint64_t end = z_timeout_end_calc(K_MSEC(100));
+	uint64_t end = sys_clock_timeout_end_calc(K_MSEC(100));
 
 	w5500_spi_write(dev, W5500_S0_CR, &cmd, 1);
 	do {
-		int64_t remaining = end - z_tick_get();
+		int64_t remaining = end - sys_clock_tick_get();
 
 		if (remaining <= 0) {
 			return -EIO;
@@ -519,6 +519,7 @@ static int w5500_init(const struct device *dev)
 				     config->gpio_pin,
 				     GPIO_INT_EDGE_FALLING);
 
+#if DT_INST_NODE_HAS_PROP(0, reset_gpios)
 	ctx->reset = device_get_binding((char *)config->reset_port);
 	if (!ctx->reset) {
 		LOG_ERR("GPIO port %s not found", config->reset_port);
@@ -533,6 +534,7 @@ static int w5500_init(const struct device *dev)
 
 	gpio_pin_set(ctx->reset, DT_INST_GPIO_PIN(0, reset_gpios), 0);
 	k_usleep(500);
+#endif
 
 	err = w5500_hw_reset(dev);
 	if (err) {
@@ -574,9 +576,11 @@ static const struct w5500_config w5500_0_config = {
 	.gpio_port = DT_INST_GPIO_LABEL(0, int_gpios),
 	.gpio_pin = DT_INST_GPIO_PIN(0, int_gpios),
 	.gpio_flags = DT_INST_GPIO_FLAGS(0, int_gpios),
+#if DT_INST_NODE_HAS_PROP(0, reset_gpios)
 	.reset_port = DT_INST_GPIO_LABEL(0, reset_gpios),
 	.reset_pin = DT_INST_GPIO_PIN(0, reset_gpios),
 	.reset_flags = DT_INST_GPIO_FLAGS(0, reset_gpios),
+#endif
 	.spi_port = DT_INST_BUS_LABEL(0),
 	.spi_freq  = DT_INST_PROP(0, spi_max_frequency),
 	.spi_slave = DT_INST_REG_ADDR(0),
@@ -588,7 +592,7 @@ static const struct w5500_config w5500_0_config = {
 	.timeout = CONFIG_ETH_W5500_TIMEOUT,
 };
 
-ETH_NET_DEVICE_INIT(eth_w5500, DT_INST_LABEL(0),
-		    w5500_init, device_pm_control_nop,
+ETH_NET_DEVICE_DT_INST_DEFINE(0,
+		    w5500_init, NULL,
 		    &w5500_0_runtime, &w5500_0_config,
 		    CONFIG_ETH_INIT_PRIORITY, &w5500_api_funcs, NET_ETH_MTU);

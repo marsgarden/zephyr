@@ -25,7 +25,11 @@ struct lll_sync {
 	uint32_t window_size_event_us;
 
 	uint8_t phy:3;
-	uint8_t is_enabled:1;
+	uint8_t is_rx_enabled:1;
+
+#if defined(CONFIG_BT_CTLR_DF_SCAN_CTE_RX)
+	struct lll_df_sync df_cfg;
+#endif /* CONFIG_BT_CTLR_DF_SCAN_CTE_RX */
 };
 
 int lll_sync_init(void);

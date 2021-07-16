@@ -49,7 +49,7 @@ macro(configure_linker_script linker_script_gen linker_pass_define)
     ${current_defines}
     ${linker_pass_define}
     ${LINKER_SCRIPT}
-    -P
+    -E
     -o ${linker_script_gen}
     VERBATIM
     WORKING_DIRECTORY ${PROJECT_BINARY_DIR}
@@ -109,13 +109,11 @@ endfunction(toolchain_ld_link_elf)
 macro(toolchain_ld_baremetal)
   zephyr_ld_options(
     -Hlld
-    -Hnocopyr
     -Hnosdata
     -Hnocrt
     -Xtimer0 # to suppress the warning message
-    -Hnoxcheck
+    -Hnoxcheck_obj
     -Hnocplus
-    -Hcl
     -Hheap=0
     -Hnoivt
   )
@@ -199,7 +197,7 @@ macro(toolchain_ld_relocation)
     ${ZEPHYR_BASE}/scripts/gen_relocate_app.py
     $<$<BOOL:${CMAKE_VERBOSE_MAKEFILE}>:--verbose>
     -d ${APPLICATION_BINARY_DIR}
-    -i '$<TARGET_PROPERTY:code_data_relocation_target,COMPILE_DEFINITIONS>'
+    -i \"$<TARGET_PROPERTY:code_data_relocation_target,COMPILE_DEFINITIONS>\"
     -o ${MEM_RELOCATION_LD}
     -s ${MEM_RELOCATION_SRAM_DATA_LD}
     -b ${MEM_RELOCATION_SRAM_BSS_LD}

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2020 Nordic Semiconductor ASA
+ * Copyright (c) 2017-2021 Nordic Semiconductor ASA
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -46,9 +46,29 @@ const uint8_t *ull_adv_pdu_update_addrs(struct ll_adv_set *adv,
 
 #if defined(CONFIG_BT_CTLR_ADV_EXT)
 
+/* Below are BT Spec v5.2, Vol 6, Part B Section 2.3.4 Table 2.12 defined */
 #define ULL_ADV_PDU_HDR_FIELD_ADVA      BIT(0)
+#define ULL_ADV_PDU_HDR_FIELD_TARGETA   BIT(1)
+#define ULL_ADV_PDU_HDR_FIELD_CTE_INFO  BIT(2)
+#define ULL_ADV_PDU_HDR_FIELD_ADI       BIT(3)
+#define ULL_ADV_PDU_HDR_FIELD_AUX_PTR   BIT(4)
 #define ULL_ADV_PDU_HDR_FIELD_SYNC_INFO BIT(5)
-#define ULL_ADV_PDU_HDR_FIELD_AD_DATA   BIT(8)
+#define ULL_ADV_PDU_HDR_FIELD_TX_POWER  BIT(6)
+#define ULL_ADV_PDU_HDR_FIELD_RFU       BIT(7)
+/* Below are implementation defined bit fields */
+#define ULL_ADV_PDU_HDR_FIELD_ACAD      BIT(8)
+#define ULL_ADV_PDU_HDR_FIELD_AD_DATA   BIT(9)
+
+/* Helper type to store data for extended advertising
+ * header fields and extra data.
+ */
+struct ull_adv_ext_hdr_data {
+	void *field_data;
+
+#if defined(CONFIG_BT_CTLR_ADV_EXT_PDU_EXTRA_DATA_MEMORY)
+	void *extra_data;
+#endif /* CONFIG_BT_CTLR_ADV_EXT_PDU_EXTRA_DATA_MEMORY */
+};
 
 /* helper function to handle adv done events */
 void ull_adv_done(struct node_rx_event_done *done);
@@ -56,6 +76,9 @@ void ull_adv_done(struct node_rx_event_done *done);
 /* Helper functions to initialise and reset ull_adv_aux module */
 int ull_adv_aux_init(void);
 int ull_adv_aux_reset(void);
+
+/* Return the aux set handle given the aux set instance */
+uint8_t ull_adv_aux_handle_get(struct ll_adv_aux_set *aux);
 
 /* Helper to read back random address */
 uint8_t const *ll_adv_aux_random_addr_get(struct ll_adv_set const *const adv,
@@ -100,10 +123,9 @@ ull_adv_aux_hdr_len_calc(struct pdu_adv_com_ext_adv *com_hdr, uint8_t **dptr)
 	uint8_t len;
 
 	len = *dptr - (uint8_t *)com_hdr;
-	if (len <= (offsetof(struct pdu_adv_com_ext_adv, ext_hdr_adv_data) +
+	if (len <= (PDU_AC_EXT_HEADER_SIZE_MIN +
 		    sizeof(struct pdu_adv_ext_hdr))) {
-		len = offsetof(struct pdu_adv_com_ext_adv,
-			       ext_hdr_adv_data);
+		len = PDU_AC_EXT_HEADER_SIZE_MIN;
 		*dptr = (uint8_t *)com_hdr + len;
 	}
 
@@ -114,8 +136,7 @@ ull_adv_aux_hdr_len_calc(struct pdu_adv_com_ext_adv *com_hdr, uint8_t **dptr)
 static inline void
 ull_adv_aux_hdr_len_fill(struct pdu_adv_com_ext_adv *com_hdr, uint8_t len)
 {
-	com_hdr->ext_hdr_len = len - offsetof(struct pdu_adv_com_ext_adv,
-					      ext_hdr_adv_data);
+	com_hdr->ext_hdr_len = len - PDU_AC_EXT_HEADER_SIZE_MIN;
 
 }
 
@@ -126,12 +147,60 @@ int ull_adv_sync_init(void);
 int ull_adv_sync_reset(void);
 
 /* helper function to start periodic advertising */
-uint32_t ull_adv_sync_start(struct ll_adv_sync_set *sync,
+uint32_t ull_adv_sync_start(struct ll_adv_set *adv,
+			    struct ll_adv_sync_set *sync,
 			    uint32_t ticks_anchor);
+
+/* helper function to release periodic advertising instance */
+void ull_adv_sync_release(struct ll_adv_sync_set *sync);
+
+/* helper function to fill initial value of sync_info structure */
+void ull_adv_sync_info_fill(struct ll_adv_sync_set *sync,
+			    struct pdu_adv_sync_info *si);
+
+/* helper function to update periodic advertising event length */
+void ull_adv_sync_update(struct ll_adv_sync_set *sync, uint32_t slot_plus_us,
+			 uint32_t slot_minus_us);
+
+/* helper function to allocate new PDU data for AUX_SYNC_IND and return
+ * previous and new PDU for further processing.
+ */
+uint8_t ull_adv_sync_pdu_alloc(struct ll_adv_set *adv,
+			       uint16_t hdr_add_fields,
+			       uint16_t hdr_rem_fields,
+			       struct ull_adv_ext_hdr_data *hdr_data,
+			       struct pdu_adv **ter_pdu_prev,
+			       struct pdu_adv **ter_pdu_new,
+			       void **extra_data_prev,
+			       void **extra_data_new,
+			       uint8_t *ter_idx);
+
+/* helper function to set/clear common extended header format fields
+ * for AUX_SYNC_IND PDU.
+ */
+uint8_t ull_adv_sync_pdu_set_clear(struct lll_adv_sync *lll_sync,
+				   struct pdu_adv *ter_pdu_prev,
+				   struct pdu_adv *ter_pdu,
+				   uint16_t hdr_add_fields,
+				   uint16_t hdr_rem_fields,
+				   struct ull_adv_ext_hdr_data *hdr_data);
+
+/* helper function to update extra_data field */
+void ull_adv_sync_extra_data_set_clear(void *extra_data_prev,
+				       void *extra_data_new,
+				       uint16_t hdr_add_fields,
+				       uint16_t hdr_rem_fields,
+				       void *data);
 
 /* helper function to schedule a mayfly to get sync offset */
 void ull_adv_sync_offset_get(struct ll_adv_set *adv);
 
 int ull_adv_iso_init(void);
 int ull_adv_iso_reset(void);
+
+#if defined(CONFIG_BT_CTLR_DF_ADV_CTE_TX)
+/* helper function to release unused DF configuration memory */
+void ull_df_adv_cfg_release(struct lll_df_adv_cfg *df_adv_cfg);
+#endif /* CONFIG_BT_CTLR_DF_ADV_CTE_TX */
+
 #endif /* CONFIG_BT_CTLR_ADV_EXT */

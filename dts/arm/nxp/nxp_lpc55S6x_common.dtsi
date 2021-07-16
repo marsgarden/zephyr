@@ -104,13 +104,34 @@
 
 		flash_reserved: flash@9D800 {
 			compatible = "soc-nv-flash";
-			reg = <0x9D800 DT_SIZE_K(10)>;
+			reg = <0x9D800 DT_SIZE_K(9)>;
 			status = "disabled";
+		};
+
+		uuid: flash@9fc70 {
+			compatible = "nxp,lpc-uid";
+			reg = <0x9fc70 0x10>;
 		};
 
 		boot_rom: flash@3000000 {
 			compatible = "soc-nv-flash";
 			reg = <0x3000000 DT_SIZE_K(128)>;
+		};
+	};
+
+	iocon: iocon@1000 {
+		compatible = "nxp,lpc-iocon";
+		reg = <0x1000 0x100>;
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges = <0x0 0x1000 0x100>;
+		pio0: pio0@0 {
+			compatible = "nxp,lpc-iocon-pio";
+			reg = <0x0 0x80>;
+		};
+		pio1: pio0@80 {
+			compatible = "nxp,lpc-iocon-pio";
+			reg = <0x80 0x80>;
 		};
 	};
 
@@ -121,6 +142,7 @@
 		label = "GPIO_0";
 		gpio-controller;
 		#gpio-cells = <2>;
+		port = <0>;
 	};
 
 	gpio1: gpio@1 {
@@ -130,6 +152,7 @@
 		label = "GPIO_1";
 		gpio-controller;
 		#gpio-cells = <2>;
+		port = <1>;
 	};
 
 	dma0: dma-controller@82000 {
@@ -148,6 +171,14 @@
 		label = "DMA_1";
 		status = "disabled";
 		#dma-cells = <1>;
+	};
+
+	mailbox0:mailbox@8b000 {
+		compatible = "nxp,lpc-mailbox";
+		reg = <0x8b000 0xEC>;
+		interrupts = <31 0>;
+		label = "MAILBOX_0";
+		status = "disabled";
 	};
 
 	flexcomm0: flexcomm@86000 {

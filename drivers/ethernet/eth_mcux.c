@@ -32,8 +32,12 @@ LOG_MODULE_REGISTER(LOG_MODULE_NAME);
 #include <ethernet/eth_stats.h>
 
 #if defined(CONFIG_PTP_CLOCK_MCUX)
-#include <ptp_clock.h>
+#include <drivers/ptp_clock.h>
 #include <net/gptp.h>
+#endif
+
+#if IS_ENABLED(CONFIG_NET_DSA)
+#include <net/dsa.h>
 #endif
 
 #include "fsl_enet.h"
@@ -118,7 +122,6 @@ struct eth_context {
 	 */
 	struct net_if *iface;
 #if defined(CONFIG_NET_POWER_MANAGEMENT)
-	const char *clock_name;
 	clock_ip_name_t clock;
 	const struct device *clock_dev;
 #endif
@@ -138,7 +141,7 @@ struct eth_context {
 	uint8_t mac_addr[6];
 	void (*generate_mac)(uint8_t *);
 	struct k_work phy_work;
-	struct k_delayed_work delayed_phy_work;
+	struct k_work_delayable delayed_phy_work;
 	/* TODO: FIXME. This Ethernet frame sized buffer is used for
 	 * interfacing with MCUX. How it works is that hardware uses
 	 * DMA scatter buffers to receive a frame, and then public
@@ -183,7 +186,7 @@ void eth_mcux_phy_stop(struct eth_context *context);
 
 static int eth_mcux_device_pm_control(const struct device *dev,
 				      uint32_t command,
-				      void *context, device_pm_cb cb, void *arg)
+				      enum pm_device_state *state)
 {
 	struct eth_context *eth_ctx = (struct eth_context *)dev->data;
 	int ret = 0;
@@ -195,8 +198,8 @@ static int eth_mcux_device_pm_control(const struct device *dev,
 		goto out;
 	}
 
-	if (command == DEVICE_PM_SET_POWER_STATE) {
-		if (*(uint32_t *)context == DEVICE_PM_SUSPEND_STATE) {
+	if (command == PM_DEVICE_STATE_SET) {
+		if (*state == PM_DEVICE_STATE_SUSPEND) {
 			LOG_DBG("Suspending");
 
 			ret = net_if_suspend(eth_ctx->iface);
@@ -211,7 +214,7 @@ static int eth_mcux_device_pm_control(const struct device *dev,
 			ENET_Deinit(eth_ctx->base);
 			clock_control_off(eth_ctx->clock_dev,
 				(clock_control_subsys_t)eth_ctx->clock);
-		} else if (*(uint32_t *)context == DEVICE_PM_ACTIVE_STATE) {
+		} else if (*state == PM_DEVICE_STATE_ACTIVE) {
 			LOG_DBG("Resuming");
 
 			clock_control_on(eth_ctx->clock_dev,
@@ -224,9 +227,6 @@ static int eth_mcux_device_pm_control(const struct device *dev,
 	}
 
 out:
-	if (cb) {
-		cb(dev, ret, context, arg);
-	}
 
 	return ret;
 }
@@ -234,7 +234,7 @@ out:
 #define ETH_MCUX_PM_FUNC eth_mcux_device_pm_control
 
 #else
-#define ETH_MCUX_PM_FUNC device_pm_control_nop
+#define ETH_MCUX_PM_FUNC NULL
 #endif /* CONFIG_NET_POWER_MANAGEMENT */
 
 #if ETH_MCUX_FIXED_LINK
@@ -378,7 +378,7 @@ void eth_mcux_phy_stop(struct eth_context *context)
 		context->phy_state = eth_mcux_phy_state_closing;
 		break;
 	case eth_mcux_phy_state_wait:
-		k_delayed_work_cancel(&context->delayed_phy_work);
+		k_work_cancel_delayable(&context->delayed_phy_work);
 		/* @todo, actually power downt he PHY ? */
 		context->phy_state = eth_mcux_phy_state_initial;
 		break;
@@ -434,7 +434,7 @@ static void eth_mcux_phy_event(struct eth_context *context)
 		       context->phy_state = eth_mcux_phy_state_reset;
 		}
 
-		k_delayed_work_submit(&context->delayed_phy_work, K_MSEC(1));
+		k_work_reschedule(&context->delayed_phy_work, K_MSEC(1));
 #endif
 		break;
 	case eth_mcux_phy_state_closing:
@@ -517,13 +517,13 @@ static void eth_mcux_phy_event(struct eth_context *context)
 		} else if (!link_up && context->link_up) {
 			LOG_INF("%s link down", eth_name(context->base));
 			context->link_up = link_up;
-			k_delayed_work_submit(&context->delayed_phy_work,
-					K_MSEC(CONFIG_ETH_MCUX_PHY_TICK_MS));
+			k_work_reschedule(&context->delayed_phy_work,
+					  K_MSEC(CONFIG_ETH_MCUX_PHY_TICK_MS));
 			context->phy_state = eth_mcux_phy_state_wait;
 			net_eth_carrier_off(context->iface);
 		} else {
-			k_delayed_work_submit(&context->delayed_phy_work,
-					K_MSEC(CONFIG_ETH_MCUX_PHY_TICK_MS));
+			k_work_reschedule(&context->delayed_phy_work,
+					  K_MSEC(CONFIG_ETH_MCUX_PHY_TICK_MS));
 			context->phy_state = eth_mcux_phy_state_wait;
 		}
 
@@ -552,8 +552,8 @@ static void eth_mcux_phy_event(struct eth_context *context)
 			eth_name(context->base),
 			(phy_speed ? "100" : "10"),
 			(phy_duplex ? "full" : "half"));
-		k_delayed_work_submit(&context->delayed_phy_work,
-				      K_MSEC(CONFIG_ETH_MCUX_PHY_TICK_MS));
+		k_work_reschedule(&context->delayed_phy_work,
+				  K_MSEC(CONFIG_ETH_MCUX_PHY_TICK_MS));
 		context->phy_state = eth_mcux_phy_state_wait;
 		break;
 	}
@@ -706,6 +706,7 @@ static void eth_rx(struct eth_context *context)
 {
 	uint16_t vlan_tag = NET_VLAN_TAG_UNSPEC;
 	uint32_t frame_length = 0U;
+	struct net_if *iface;
 	struct net_pkt *pkt;
 	status_t status;
 	unsigned int imask;
@@ -807,7 +808,11 @@ static void eth_rx(struct eth_context *context)
 
 	irq_unlock(imask);
 
-	if (net_recv_data(get_iface(context, vlan_tag), pkt) < 0) {
+	iface = get_iface(context, vlan_tag);
+#if IS_ENABLED(CONFIG_NET_DSA)
+	iface = dsa_net_recv(iface, &pkt);
+#endif
+	if (net_recv_data(iface, pkt) < 0) {
 		net_pkt_unref(pkt);
 		goto error;
 	}
@@ -825,7 +830,7 @@ error:
 	eth_stats_update_errors_rx(get_iface(context, vlan_tag));
 }
 
-#if defined(CONFIG_PTP_CLOCK_MCUX)
+#if defined(CONFIG_PTP_CLOCK_MCUX) && defined(CONFIG_NET_GPTP)
 static inline void ts_register_tx_event(struct eth_context *context,
 					 enet_frame_info_t *frameinfo)
 {
@@ -857,7 +862,7 @@ static inline void ts_register_tx_event(struct eth_context *context,
 		ts_tx_rd = 0;
 	}
 }
-#endif /* CONFIG_PTP_CLOCK_MCUX */
+#endif /* CONFIG_PTP_CLOCK_MCUX && CONFIG_NET_PKT_TIMESTAMP */
 
 static void eth_callback(ENET_Type *base, enet_handle_t *handle,
 #if FSL_FEATURE_ENET_QUEUE > 1
@@ -872,10 +877,10 @@ static void eth_callback(ENET_Type *base, enet_handle_t *handle,
 		eth_rx(context);
 		break;
 	case kENET_TxEvent:
-#if defined(CONFIG_PTP_CLOCK_MCUX)
+#if defined(CONFIG_PTP_CLOCK_MCUX) && defined(CONFIG_NET_GPTP)
 		/* Register event */
 		ts_register_tx_event(context, frameinfo);
-#endif /* CONFIG_PTP_CLOCK_MCUX */
+#endif /* CONFIG_PTP_CLOCK_MCUX && CONFIG_NET_GPTP */
 
 		/* Free the TX buffer. */
 		k_sem_give(&context->tx_buf_sem);
@@ -992,14 +997,13 @@ static int eth_init(const struct device *dev)
 	const uint32_t inst = ENET_GetInstance(context->base);
 
 	context->clock = enet_clocks[inst];
-	context->clock_dev = device_get_binding(context->clock_name);
 #endif
 
 	k_sem_init(&context->tx_buf_sem,
 		   0, CONFIG_ETH_MCUX_TX_BUFFERS);
 	k_work_init(&context->phy_work, eth_mcux_phy_work);
-	k_delayed_work_init(&context->delayed_phy_work,
-			    eth_mcux_delayed_phy_work);
+	k_work_init_delayable(&context->delayed_phy_work,
+			      eth_mcux_delayed_phy_work);
 
 	if (context->generate_mac) {
 		context->generate_mac(context->mac_addr);
@@ -1058,6 +1062,9 @@ static void eth_iface_init(struct net_if *iface)
 		context->iface = iface;
 	}
 
+#if IS_ENABLED(CONFIG_NET_DSA)
+	dsa_register_master_tx(iface, &eth_tx);
+#endif
 	ethernet_init(iface);
 	net_if_flag_set(iface, NET_IF_NO_AUTO_START);
 
@@ -1071,6 +1078,9 @@ static enum ethernet_hw_caps eth_mcux_get_capabilities(const struct device *dev)
 	return ETHERNET_HW_VLAN | ETHERNET_LINK_10BASE_T |
 #if defined(CONFIG_PTP_CLOCK_MCUX)
 		ETHERNET_PTP |
+#endif
+#if IS_ENABLED(CONFIG_NET_DSA)
+		ETHERNET_DSA_MASTER_PORT |
 #endif
 #if defined(CONFIG_ETH_MCUX_HW_ACCELERATION)
 		ETHERNET_HW_TX_CHKSUM_OFFLOAD |
@@ -1124,7 +1134,11 @@ static const struct ethernet_api api_funcs = {
 #endif
 	.get_capabilities	= eth_mcux_get_capabilities,
 	.set_config		= eth_mcux_set_config,
+#if IS_ENABLED(CONFIG_NET_DSA)
+	.send                   = dsa_tx,
+#else
 	.send			= eth_tx,
+#endif
 };
 
 #if defined(CONFIG_PTP_CLOCK_MCUX)
@@ -1210,7 +1224,7 @@ static void eth_mcux_err_isr(const struct device *dev)
 		IRQ_CONNECT(DT_INST_IRQ_BY_NAME(n, name, irq),		\
 			    DT_INST_IRQ_BY_NAME(n, name, priority),	\
 			    eth_mcux_##name##_isr,			\
-			    DEVICE_GET(eth_mcux_##n),			\
+			    DEVICE_DT_INST_GET(n),			\
 			    0);						\
 		irq_enable(DT_INST_IRQ_BY_NAME(n, name, irq));		\
 	} while (0)
@@ -1228,7 +1242,7 @@ static void eth_mcux_err_isr(const struct device *dev)
 		IRQ_CONNECT(DT_IRQ_BY_NAME(PTP_INST_NODEID(n), ieee1588_tmr, irq),	\
 			    DT_IRQ_BY_NAME(PTP_INST_NODEID(n), ieee1588_tmr, priority),	\
 			    eth_mcux_ptp_isr,						\
-			    DEVICE_GET(eth_mcux_##n),					\
+			    DEVICE_DT_INST_GET(n),					\
 			    0);								\
 		irq_enable(DT_IRQ_BY_NAME(PTP_INST_NODEID(n), ieee1588_tmr, irq));	\
 	} while (0)
@@ -1296,7 +1310,7 @@ static void eth_mcux_err_isr(const struct device *dev)
 		    (ETH_MCUX_MAC_ADDR_GENERATE(n)))
 
 #define ETH_MCUX_POWER_INIT(n)						\
-	.clock_name = DT_INST_CLOCKS_LABEL(n),				\
+	.clock_dev = DEVICE_DT_GET(DT_INST_CLOCKS_CTLR(n)),		\
 
 #define ETH_MCUX_POWER(n)						\
 	COND_CODE_1(CONFIG_NET_POWER_MANAGEMENT,			\
@@ -1367,8 +1381,7 @@ static void eth_mcux_err_isr(const struct device *dev)
 		ETH_MCUX_PTP_FRAMEINFO(n)				\
 	};								\
 									\
-	ETH_NET_DEVICE_INIT(eth_mcux_##n,				\
-			    DT_INST_LABEL(n),				\
+	ETH_NET_DEVICE_DT_INST_DEFINE(n,					\
 			    eth_init,					\
 			    ETH_MCUX_PM_FUNC,				\
 			    &eth##n##_context,				\
@@ -1509,7 +1522,7 @@ static const struct ptp_clock_driver_api api = {
 
 static int ptp_mcux_init(const struct device *port)
 {
-	const struct device *eth_dev = DEVICE_GET(eth_mcux_0);
+	const struct device *eth_dev = DEVICE_DT_GET(DT_NODELABEL(enet));
 	struct eth_context *context = eth_dev->data;
 	struct ptp_context *ptp_context = port->data;
 
@@ -1519,8 +1532,8 @@ static int ptp_mcux_init(const struct device *port)
 	return 0;
 }
 
-DEVICE_AND_API_INIT(mcux_ptp_clock_0, PTP_CLOCK_NAME, ptp_mcux_init,
-		    &ptp_mcux_0_context, NULL, POST_KERNEL,
-		    CONFIG_APPLICATION_INIT_PRIORITY, &api);
+DEVICE_DEFINE(mcux_ptp_clock_0, PTP_CLOCK_NAME, ptp_mcux_init,
+		NULL, &ptp_mcux_0_context, NULL, POST_KERNEL,
+		CONFIG_APPLICATION_INIT_PRIORITY, &api);
 
 #endif /* CONFIG_PTP_CLOCK_MCUX */

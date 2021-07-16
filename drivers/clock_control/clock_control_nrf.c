@@ -110,8 +110,6 @@ static struct onoff_manager *get_onoff_manager(const struct device *dev,
 }
 
 
-DEVICE_DT_DECLARE(DT_NODELABEL(clock));
-
 #define CLOCK_DEVICE DEVICE_DT_GET(DT_NODELABEL(clock))
 
 struct onoff_manager *z_nrf_clock_control_get_onoff(clock_control_subsys_t sys)
@@ -213,7 +211,8 @@ static void lfclk_start(void)
 
 static void lfclk_stop(void)
 {
-	if (IS_ENABLED(CONFIG_CLOCK_CONTROL_NRF_K32SRC_RC_CALIBRATION)) {
+	if (IS_ENABLED(CONFIG_CLOCK_CONTROL_NRF_K32SRC_RC_CALIBRATION) &&
+	    !IS_ENABLED(CONFIG_CLOCK_CONTROL_NRF_FORCE_ALT)) {
 		z_nrf_clock_calibration_lfclk_stopped();
 	}
 
@@ -502,7 +501,7 @@ static void lfclk_spinwait(enum nrf_lfclk_start_mode mode)
 		 * happen before calling idle. That would lead to deadlock.
 		 */
 		if (!IS_ENABLED(CONFIG_CLOCK_CONTROL_NRF_K32SRC_SYNTH)) {
-			if (isr_mode) {
+			if (isr_mode || !IS_ENABLED(CONFIG_MULTITHREADING)) {
 				k_cpu_atomic_idle(key);
 			} else {
 				k_msleep(1);
@@ -600,15 +599,19 @@ static void clock_event_handler(nrfx_clock_evt_type_t event)
 		break;
 #endif
 	case NRFX_CLOCK_EVT_LFCLK_STARTED:
-		if (IS_ENABLED(
-			CONFIG_CLOCK_CONTROL_NRF_K32SRC_RC_CALIBRATION)) {
+		if (IS_ENABLED(CONFIG_CLOCK_CONTROL_NRF_K32SRC_RC_CALIBRATION) &&
+		    !IS_ENABLED(CONFIG_CLOCK_CONTROL_NRF_FORCE_ALT)) {
 			z_nrf_clock_calibration_lfclk_started();
 		}
 		clkstarted_handle(dev, CLOCK_CONTROL_NRF_TYPE_LFCLK);
 		break;
 	case NRFX_CLOCK_EVT_CAL_DONE:
-		if (IS_ENABLED(CONFIG_CLOCK_CONTROL_NRF_K32SRC_RC_CALIBRATION)) {
+		if (IS_ENABLED(CONFIG_CLOCK_CONTROL_NRF_K32SRC_RC_CALIBRATION) &&
+		    !IS_ENABLED(CONFIG_CLOCK_CONTROL_NRF_FORCE_ALT)) {
 			z_nrf_clock_calibration_done_handler();
+		} else {
+			/* Should not happen when calibration is disabled. */
+			__ASSERT_NO_MSG(false);
 		}
 		break;
 	default:
@@ -635,7 +638,8 @@ static int clk_init(const struct device *dev)
 		return -EIO;
 	}
 
-	if (IS_ENABLED(CONFIG_CLOCK_CONTROL_NRF_K32SRC_RC_CALIBRATION)) {
+	if (IS_ENABLED(CONFIG_CLOCK_CONTROL_NRF_K32SRC_RC_CALIBRATION) &&
+	    !IS_ENABLED(CONFIG_CLOCK_CONTROL_NRF_FORCE_ALT)) {
 		struct nrf_clock_control_data *data = dev->data;
 
 		z_nrf_clock_calibration_init(data->mgr);
@@ -698,7 +702,7 @@ static const struct nrf_clock_control_config config = {
 	}
 };
 
-DEVICE_DT_DEFINE(DT_NODELABEL(clock), clk_init, device_pm_control_nop,
+DEVICE_DT_DEFINE(DT_NODELABEL(clock), clk_init, NULL,
 		 &data, &config,
 		 PRE_KERNEL_1, CONFIG_KERNEL_INIT_PRIORITY_DEVICE,
 		 &clock_control_api);

@@ -217,8 +217,6 @@ static uint32_t gpio_cc13xx_cc26xx_get_pending_int(const struct device *dev)
 	return GPIO_getEventMultiDio(GPIO_DIO_ALL_MASK);
 }
 
-DEVICE_DECLARE(gpio_cc13xx_cc26xx);
-
 static void gpio_cc13xx_cc26xx_isr(const struct device *dev)
 {
 	struct gpio_cc13xx_cc26xx_data *data = dev->data;
@@ -258,7 +256,7 @@ static int gpio_cc13xx_cc26xx_init(const struct device *dev)
 	/* Enable IRQ */
 	IRQ_CONNECT(DT_INST_IRQN(0),
 		    DT_INST_IRQ(0, priority),
-		    gpio_cc13xx_cc26xx_isr, DEVICE_GET(gpio_cc13xx_cc26xx), 0);
+		    gpio_cc13xx_cc26xx_isr, DEVICE_DT_INST_GET(0), 0);
 	irq_enable(DT_INST_IRQN(0));
 
 	/* Peripheral should not be accessed until power domain is on. */
@@ -282,8 +280,8 @@ static const struct gpio_driver_api gpio_cc13xx_cc26xx_driver_api = {
 	.get_pending_int = gpio_cc13xx_cc26xx_get_pending_int
 };
 
-DEVICE_AND_API_INIT(gpio_cc13xx_cc26xx, DT_INST_LABEL(0),
-		    gpio_cc13xx_cc26xx_init, &gpio_cc13xx_cc26xx_data_0,
+DEVICE_DT_INST_DEFINE(0, gpio_cc13xx_cc26xx_init,
+		    NULL, &gpio_cc13xx_cc26xx_data_0,
 		    &gpio_cc13xx_cc26xx_cfg_0,
 		    POST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEVICE,
 		    &gpio_cc13xx_cc26xx_driver_api);

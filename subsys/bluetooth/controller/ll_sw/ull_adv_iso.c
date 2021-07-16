@@ -5,35 +5,42 @@
  */
 
 #include <zephyr.h>
+#include <sys/byteorder.h>
+#include <bluetooth/bluetooth.h>
 
-#define BT_DBG_ENABLED IS_ENABLED(CONFIG_BT_DEBUG_HCI_DRIVER)
-#define LOG_MODULE_NAME bt_ctlr_ull_adv_iso
-#include "common/log.h"
-#include "hal/debug.h"
 #include "hal/cpu.h"
 #include "hal/ccm.h"
 #include "hal/ticker.h"
 
 #include "util/util.h"
-#include "util/memq.h"
-#include "util/mayfly.h"
 #include "util/mem.h"
+#include "util/memq.h"
 #include "util/mfifo.h"
+#include "util/mayfly.h"
+
 #include "ticker/ticker.h"
 
 #include "pdu.h"
-#include "ll.h"
-#include "lll.h"
 
-#include "lll_vendor.h"
+#include "lll.h"
+#include "lll/lll_vendor.h"
+#include "lll/lll_adv_types.h"
 #include "lll_adv.h"
+#include "lll/lll_adv_pdu.h"
 #include "lll_conn.h"
 
 #include "ull_internal.h"
 #include "ull_adv_types.h"
 #include "ull_adv_internal.h"
 
-static struct ll_adv_iso ll_adv_iso[CONFIG_BT_CTLR_ADV_SET];
+#include "ll.h"
+
+#define BT_DBG_ENABLED IS_ENABLED(CONFIG_BT_DEBUG_HCI_DRIVER)
+#define LOG_MODULE_NAME bt_ctlr_ull_adv_iso
+#include "common/log.h"
+#include "hal/debug.h"
+
+static struct ll_adv_iso ll_adv_iso[BT_CTLR_ADV_SET];
 static void *adv_iso_free;
 
 static uint32_t ull_adv_iso_start(struct ll_adv_iso *adv_iso,
@@ -41,7 +48,7 @@ static uint32_t ull_adv_iso_start(struct ll_adv_iso *adv_iso,
 static inline struct ll_adv_iso *ull_adv_iso_get(uint8_t handle);
 static int init_reset(void);
 static void ticker_cb(uint32_t ticks_at_expire, uint32_t remainder,
-		      uint16_t lazy, void *param);
+		      uint16_t lazy, uint8_t force, void *param);
 static void tx_lll_flush(void *param);
 static void ticker_op_stop_cb(uint32_t status, void *param);
 
@@ -51,23 +58,38 @@ uint8_t ll_big_create(uint8_t big_handle, uint8_t adv_handle, uint8_t num_bis,
 		      uint8_t packing, uint8_t framing, uint8_t encryption,
 		      uint8_t *bcode)
 {
+	uint8_t field_data[1 + sizeof(uint8_t *)];
+	struct ull_adv_ext_hdr_data hdr_data;
+	void *extra_data_prev, *extra_data;
+	struct lll_adv_sync *lll_adv_sync;
+	struct lll_adv_iso *lll_adv_iso;
+	struct pdu_adv *pdu_prev, *pdu;
+	struct node_rx_pdu *node_rx;
 	struct ll_adv_iso *adv_iso;
 	struct ll_adv_set *adv;
-	struct node_rx_pdu *node_rx;
+	uint8_t ter_idx;
+	uint8_t *acad;
+	uint8_t err;
 
 	adv_iso = ull_adv_iso_get(big_handle);
 
-	if (!adv_iso || adv_iso->is_created) {
+	/* Already created */
+	if (!adv_iso || adv_iso->lll.adv) {
 		return BT_HCI_ERR_CMD_DISALLOWED;
 	}
 
+	/* No advertising set created */
 	adv = ull_adv_is_created_get(adv_handle);
+	if (!adv) {
+		return BT_HCI_ERR_UNKNOWN_ADV_IDENTIFIER;
+	}
 
 	/* Does not identify a periodic advertising train or
 	 * the periodic advertising trains is already associated
 	 * with another BIG.
 	 */
-	if (!adv || !adv->lll.sync || adv->lll.sync->adv_iso) {
+	lll_adv_sync = adv->lll.sync;
+	if (!lll_adv_sync || lll_adv_sync->iso) {
 		return BT_HCI_ERR_UNKNOWN_ADV_IDENTIFIER;
 	}
 
@@ -115,6 +137,30 @@ uint8_t ll_big_create(uint8_t big_handle, uint8_t adv_handle, uint8_t num_bis,
 	if (num_bis != 1) {
 		return BT_HCI_ERR_MEM_CAPACITY_EXCEEDED;
 	}
+
+	/* Allocate next PDU */
+	err = ull_adv_sync_pdu_alloc(adv, 0, 0, NULL, &pdu_prev, &pdu,
+				     &extra_data_prev, &extra_data, &ter_idx);
+	if (err) {
+		return err;
+	}
+
+	/* Add ACAD to AUX_SYNC_IND */
+	hdr_data.field_data = field_data;
+	field_data[0] = sizeof(struct pdu_big_info) + 2;
+	err = ull_adv_sync_pdu_set_clear(lll_adv_sync, pdu_prev, pdu,
+					 ULL_ADV_PDU_HDR_FIELD_ACAD, 0U,
+					 &hdr_data);
+	if (err) {
+		return err;
+	}
+
+	memcpy(&acad, &field_data[1], sizeof(acad));
+	acad[0] = sizeof(struct pdu_big_info) + 1;
+	acad[1] = BT_DATA_BIG_INFO;
+
+	lll_adv_sync_data_enqueue(lll_adv_sync, ter_idx);
+
 	/* TODO: For now we can just use the unique BIG handle as the BIS
 	 * handle until we support multiple BIS
 	 */
@@ -131,10 +177,15 @@ uint8_t ll_big_create(uint8_t big_handle, uint8_t adv_handle, uint8_t num_bis,
 	adv_iso->encryption = encryption;
 	memcpy(adv_iso->bcode, bcode, sizeof(adv_iso->bcode));
 
-	/* TODO: Add ACAD to AUX_SYNC_IND */
-
 	/* TODO: start sending BIS empty data packet for each BIS */
 	ull_adv_iso_start(adv_iso, 0 /* TODO: Calc ticks_anchor */);
+
+	/* Associate the ISO instance with a Periodic Advertising and
+	 * an Extended Advertising instance
+	 */
+	lll_adv_iso = &adv_iso->lll;
+	lll_adv_sync->iso = lll_adv_iso;
+	lll_adv_iso->adv = &adv->lll;
 
 	/* Prepare BIG complete event */
 	/* TODO: Implement custom node_rx struct for optimization */
@@ -142,8 +193,6 @@ uint8_t ll_big_create(uint8_t big_handle, uint8_t adv_handle, uint8_t num_bis,
 	node_rx->hdr.type = NODE_RX_TYPE_BIG_COMPLETE;
 	node_rx->hdr.handle = big_handle;
 	node_rx->hdr.rx_ftr.param = adv_iso;
-
-	adv_iso->is_created = true;
 
 	return BT_HCI_ERR_SUCCESS;
 }
@@ -178,15 +227,47 @@ uint8_t ll_big_test_create(uint8_t big_handle, uint8_t adv_handle,
 
 uint8_t ll_big_terminate(uint8_t big_handle, uint8_t reason)
 {
-	struct ll_adv_iso *adv_iso;
+	void *extra_data_prev, *extra_data;
+	struct lll_adv_sync *lll_adv_sync;
+	struct lll_adv_iso *lll_adv_iso;
+	struct pdu_adv *pdu_prev, *pdu;
 	struct node_rx_pdu *node_rx;
+	struct ll_adv_iso *adv_iso;
+	struct lll_adv *lll_adv;
+	struct ll_adv_set *adv;
+	uint8_t ter_idx;
 	uint32_t ret;
+	uint8_t err;
 
 	adv_iso = ull_adv_iso_get(big_handle);
-
 	if (!adv_iso) {
 		return BT_HCI_ERR_UNKNOWN_ADV_IDENTIFIER;
 	}
+
+	lll_adv_iso = &adv_iso->lll;
+	lll_adv = lll_adv_iso->adv;
+	if (!lll_adv) {
+		return BT_HCI_ERR_UNKNOWN_ADV_IDENTIFIER;
+	}
+
+	lll_adv_sync = lll_adv->sync;
+	adv = HDR_LLL2ULL(lll_adv);
+
+	/* Allocate next PDU */
+	err = ull_adv_sync_pdu_alloc(adv, 0, 0, NULL, &pdu_prev, &pdu,
+				     &extra_data_prev, &extra_data, &ter_idx);
+	if (err) {
+		return err;
+	}
+
+	/* Remove ACAD to AUX_SYNC_IND */
+	err = ull_adv_sync_pdu_set_clear(lll_adv_sync, pdu_prev, pdu,
+					 0U, ULL_ADV_PDU_HDR_FIELD_ACAD, NULL);
+	if (err) {
+		return err;
+	}
+
+	lll_adv_sync_data_enqueue(lll_adv_sync, ter_idx);
 
 	/* TODO: Terminate all BIS data paths */
 
@@ -194,7 +275,8 @@ uint8_t ll_big_terminate(uint8_t big_handle, uint8_t reason)
 			  TICKER_ID_ADV_ISO_BASE + adv_iso->bis_handle,
 			  ticker_op_stop_cb, adv_iso);
 
-	adv_iso->is_created = 0U;
+	lll_adv_iso->adv = NULL;
+	lll_adv_sync->iso = NULL;
 
 	/* Prepare BIG terminate event */
 	node_rx = (void *)&adv_iso->node_rx_terminate;
@@ -238,8 +320,8 @@ uint8_t ll_adv_iso_by_hci_handle_get(uint8_t hci_handle, uint8_t *handle)
 
 	adv_iso =  &ll_adv_iso[0];
 
-	for (idx = 0U; idx < CONFIG_BT_CTLR_ADV_SET; idx++, adv_iso++) {
-		if (adv_iso->is_created &&
+	for (idx = 0U; idx < BT_CTLR_ADV_SET; idx++, adv_iso++) {
+		if (adv_iso->lll.adv &&
 		    (adv_iso->hci_handle == hci_handle)) {
 			*handle = idx;
 			return 0;
@@ -257,8 +339,8 @@ uint8_t ll_adv_iso_by_hci_handle_new(uint8_t hci_handle, uint8_t *handle)
 	adv_iso = &ll_adv_iso[0];
 	adv_iso_empty = NULL;
 
-	for (idx = 0U; idx < CONFIG_BT_CTLR_ADV_SET; idx++, adv_iso++) {
-		if (adv_iso->is_created) {
+	for (idx = 0U; idx < BT_CTLR_ADV_SET; idx++, adv_iso++) {
+		if (adv_iso->lll.adv) {
 			if (adv_iso->hci_handle == hci_handle) {
 				return BT_HCI_ERR_CMD_DISALLOWED;
 			}
@@ -293,16 +375,16 @@ static uint32_t ull_adv_iso_start(struct ll_adv_iso *adv_iso,
 	slot_us = EVENT_OVERHEAD_START_US + EVENT_OVERHEAD_END_US;
 	slot_us += 1000;
 
-	adv_iso->evt.ticks_active_to_start = 0;
-	adv_iso->evt.ticks_xtal_to_start =
+	adv_iso->ull.ticks_active_to_start = 0;
+	adv_iso->ull.ticks_prepare_to_start =
 		HAL_TICKER_US_TO_TICKS(EVENT_OVERHEAD_XTAL_US);
-	adv_iso->evt.ticks_preempt_to_start =
+	adv_iso->ull.ticks_preempt_to_start =
 		HAL_TICKER_US_TO_TICKS(EVENT_OVERHEAD_PREEMPT_MIN_US);
-	adv_iso->evt.ticks_slot = HAL_TICKER_US_TO_TICKS(slot_us);
+	adv_iso->ull.ticks_slot = HAL_TICKER_US_TO_TICKS(slot_us);
 
 	if (IS_ENABLED(CONFIG_BT_CTLR_LOW_LAT)) {
-		ticks_slot_overhead = MAX(adv_iso->evt.ticks_active_to_start,
-					  adv_iso->evt.ticks_xtal_to_start);
+		ticks_slot_overhead = MAX(adv_iso->ull.ticks_active_to_start,
+					  adv_iso->ull.ticks_prepare_to_start);
 	} else {
 		ticks_slot_overhead = 0;
 	}
@@ -320,7 +402,7 @@ static uint32_t ull_adv_iso_start(struct ll_adv_iso *adv_iso,
 			   HAL_TICKER_US_TO_TICKS(iso_interval_us),
 			   HAL_TICKER_REMAINDER(iso_interval_us),
 			   TICKER_NULL_LAZY,
-			   (ll_adv_iso->evt.ticks_slot + ticks_slot_overhead),
+			   (ll_adv_iso->ull.ticks_slot + ticks_slot_overhead),
 			   ticker_cb, ll_adv_iso,
 			   ull_ticker_status_give, (void *)&ret_cb);
 	ret = ull_ticker_status_take(ret, &ret_cb);
@@ -330,7 +412,7 @@ static uint32_t ull_adv_iso_start(struct ll_adv_iso *adv_iso,
 
 static inline struct ll_adv_iso *ull_adv_iso_get(uint8_t handle)
 {
-	if (handle >= CONFIG_BT_CTLR_ADV_SET) {
+	if (handle >= BT_CTLR_ADV_SET) {
 		return NULL;
 	}
 
@@ -348,7 +430,7 @@ static int init_reset(void)
 
 
 static void ticker_cb(uint32_t ticks_at_expire, uint32_t remainder,
-		      uint16_t lazy, void *param)
+		      uint16_t lazy, uint8_t force, void *param)
 {
 	/* TODO: LLL support for ADV ISO */
 #if 0
@@ -372,6 +454,7 @@ static void ticker_cb(uint32_t ticks_at_expire, uint32_t remainder,
 	p.ticks_at_expire = ticks_at_expire;
 	p.remainder = remainder;
 	p.lazy = lazy;
+	p.force = force;
 	p.param = lll;
 	mfy.param = &p;
 
